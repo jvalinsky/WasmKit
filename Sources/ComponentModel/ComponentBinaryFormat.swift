@@ -2,6 +2,19 @@
 /// These constants are shared between the encoder (`ComponentEncoder`) and parser (`ComponentParser`).
 /// Reference: `Vendor/component-model/design/mvp/Binary.md`
 
+// MARK: - Component Header
+
+package enum ComponentHeader {
+    package static let magic: [UInt8] = [0x00, 0x61, 0x73, 0x6D]
+
+    /// Pre-standard version, bumped as the proposal changes.
+    package static let version: [UInt8] = [0x0d, 0x00]
+
+    package static let layer: [UInt8] = [0x01, 0x00]
+}
+
+// MARK: - Section IDs
+
 /// Section IDs per Binary.md
 package enum ComponentSectionID: UInt8, Comparable {
     case custom = 0x00
@@ -269,4 +282,26 @@ package enum NameVariant: UInt8 {
     case plain = 0x00
     /// Name with version suffix (gated: versioning)
     case withVersion = 0x01
+}
+
+/// Core module marker that follows ExternDescKind.coreModule
+package let coreModuleMarker: UInt8 = 0x11
+
+package let resourceRepI32Marker: UInt8 = 0x7f
+
+// MARK: - CoreDefSort Extension
+
+extension CoreDefSort {
+    package var binaryEncoding: UInt8 {
+        switch self {
+        case .func: return CoreSortOpcode.function.rawValue
+        case .table: return CoreSortOpcode.table.rawValue
+        case .memory: return CoreSortOpcode.memory.rawValue
+        case .global: return CoreSortOpcode.global.rawValue
+        case .tag: return CoreSortOpcode.tag.rawValue
+        case .type: return CoreSortOpcode.type.rawValue
+        case .module: return CoreSortOpcode.module.rawValue
+        case .instance: return CoreSortOpcode.instance.rawValue
+        }
+    }
 }

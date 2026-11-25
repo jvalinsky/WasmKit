@@ -152,6 +152,20 @@ package enum ComponentDefValType: Hashable {
 
         return true
     }
+
+    package var index: ComponentTypeIndex? {
+        guard case .inlined(.index(let idx)) = self else { return nil }
+
+        return idx
+    }
+
+    package func getOrCreateIndex<E: Error>(create: () throws(E) -> ComponentTypeIndex) throws(E) -> ComponentTypeIndex {
+        return if let index {
+            index
+        } else {
+            try create()
+        }
+    }
 }
 
 package struct ComponentFuncType: Hashable {
