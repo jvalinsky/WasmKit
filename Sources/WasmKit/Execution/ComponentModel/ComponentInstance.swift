@@ -200,6 +200,111 @@
             self.store = store
         }
 
+        /// The type of a host component function implementation closure.
+        ///
+        /// Mirrors `Function.Implementation` one level up: the closure receives
+        /// component-level values and returns component-level values, and WasmKit
+        /// performs the canonical ABI lifting/lowering around the call.
+        public typealias Implementation = (borrowing Caller, [ComponentValue]) throws -> [ComponentValue]
+
+        /// Creates a component function backed by an existing host core function.
+        ///
+        /// Use this when you already have a `Function` whose type is the flattened
+        /// form of `type` - one core value per flat primitive parameter, and the
+        /// flattened result type. The component function lowers its arguments to
+        /// core values before calling the host function and lifts its results back.
+        ///
+        /// - Parameters:
+        ///   - store: The store to allocate the component function in.
+        ///   - function: The host function backing this component function.
+        ///   - type: The component-level function type.
+        public init(store: Store, function: Function, type: ComponentFuncType) {
+            self.init(store: store, type: type, coreFunction: function.handle)
+        }
+
+        /// Creates a component function backed by a native host closure.
+        ///
+        /// This is the component-level counterpart of `Function.init(store:type:body:)`.
+        /// The closure works with component-level values; WasmKit lowers the arguments
+        /// to flat core values, invokes the closure, and lifts the results back.
+        /// Pass the result to `ComponentImports.define(name:function:)` to satisfy
+        /// a component import of the same name.
+        ///
+        /// Only flat primitive parameter and result types are supported (booleans,
+        /// integers, floats, and `char`): each flattens to exactly one core value.
+        /// A `string`, list, record, tuple, or other compound type traps with a
+        /// `CanonicalABIError` when the function is called, matching what
+        /// canonical lowering supports today.
+        ///
+        /// - Parameters:
+        ///   - store: The store to allocate the component function in.
+        ///   - type: The component-level function type.
+        ///   - body: The implementation of the function.
+        public init(store: Store, type: ComponentFuncType, body: @escaping Implementation) {
+            // Lower the component function to a core host function that lifts its
+            // flat core arguments to component values, calls the closure, and
+            // lowers the component results back to flat core values.
+            // This mirrors the wrapper `ComponentLoader` builds for `canon.lower`.
+            let coreFunction = Function(store: store, type: flattenComponentFuncType(type)) { caller, coreArgs in
+                var componentArgs: [ComponentValue] = []
+                componentArgs.reserveCapacity(type.params.count)
+                var argIndex = 0
+                for param in type.params {
+                    // Reject non-flat types loudly instead of misaligning arguments:
+                    // strings flatten to two core values, records/tuples/lists to none.
+                    guard param.type.flattenedCount == 1, argIndex < coreArgs.count else {
+                        throw CanonicalABIError(
+                            description: "Host component function does not support parameter type \(param.type): only flat primitive types are supported"
+                        )
+                    }
+                    componentArgs.append(try param.type.liftFlatCoreValue(coreArgs[argIndex]))
+                    argIndex += 1
+                }
+
+                let results = try body(caller, componentArgs)
+
+                switch type.result {
+                case nil:
+                    guard results.isEmpty else {
+                        throw CanonicalABIError(
+                            description: "Host component function with no result returned \(results.count) value(s)"
+                        )
+                    }
+                    return []
+                case let resultType?:
+                    guard resultType.flattenedCount == 1, results.count == 1, let result = results.first else {
+                        throw CanonicalABIError(
+                            description: "Host component function with result type \(resultType) must return exactly one component value; only flat primitive result types are supported"
+                        )
+                    }
+                    return try lowerFlat(result, paramType: resultType)
+                }
+            }
+            self.init(store: store, type: type, coreFunction: coreFunction.handle)
+        }
+
+        /// Creates a component function from a core function handle.
+        ///
+        /// The entity holds no guest memory and no component type table: string
+        /// and list values cannot cross this boundary yet, and indexed types
+        /// (records/variants defined in a component) cannot be resolved.
+        /// The owning component instance is a placeholder, as in canonical
+        /// lifting - nothing reads it today.
+        private init(store: Store, type: ComponentFuncType, coreFunction: InternalFunction) {
+            let entity = ComponentFunctionEntity(
+                type: type,
+                coreFunction: coreFunction,
+                canonOptions: CanonOptions(),
+                instance: store.allocator.allocate(componentInstance: .empty),
+                resolveType: { (index: ComponentTypeIndex) throws -> ComponentDefValType in
+                    throw CanonicalABIError(
+                        description: "Host component function cannot resolve component type index \(index.rawValue): host functions have no component type table"
+                    )
+                }
+            )
+            self.init(handle: store.allocator.allocate(componentFunction: entity), store: store)
+        }
+
         /// The component-level function type.
         public var type: ComponentFuncType {
             handle.type
