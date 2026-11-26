@@ -853,6 +853,86 @@
                 Issue.record("Expected u32 result, got \(results[0])")
             }
         }
+
+        // MARK: - Host Component Function Tests
+
+        @Test
+        func hostFunctionImportFromSwift() throws {
+            let engine = Engine()
+            let store = Store(engine: engine)
+
+            // Core module: imports "add" from "env", re-exports it as "call-add".
+            let module = try parseWasm(
+                bytes: wat2wasm(
+                    """
+                    (module
+                        (func $host-add (import "env" "add") (param i32 i32) (result i32))
+                        (func (export "call-add") (param i32 i32) (result i32)
+                            local.get 0
+                            local.get 1
+                            call $host-add)
+                        (memory (export "memory") 1)
+                    )
+                    """
+                )
+            )
+
+            let addType = ComponentFuncType(
+                params: [
+                    .init(name: "a", type: .primitive(.s32)),
+                    .init(name: "b", type: .primitive(.s32)),
+                ],
+                result: .primitive(.s32))
+
+            // The host function under test: a Swift closure as a component import.
+            let hostAdd = ComponentFunction(store: store, type: addType) { _, args in
+                guard case .s32(let a) = args[0], case .s32(let b) = args[1] else {
+                    throw CanonicalABIError(description: "expected two s32 arguments, got \(args)")
+                }
+                return [.s32(a + b)]
+            }
+
+            var component = ParsedComponent()
+            component.imports.append(
+                ParsedComponentImport(name: "add", kind: .function(addType)))
+            component.coreModules.append(ParsedCoreModule(module: module))
+            // Lower the imported component function to a core function (index 0).
+            component.canonicalDefinitions.append(
+                ParsedCanonicalDefinition(kind: .lower(componentFunctionIndex: 0)))
+            // Inline-exports core instance exposing the lowered function as "add".
+            component.coreInstanceDefs.append(
+                .exports([ParsedCoreInlineExport(name: "add", sort: .func, index: 0)]))
+            // Instantiate the module, satisfying "env" from that instance.
+            component.coreInstanceDefs.append(
+                .instantiate(moduleIndex: 0,
+                             args: [ParsedCoreInstantiateArg(name: "env", instanceIndex: 0)]))
+            // Lift "call-add" out of the instance (index 1) as a component export.
+            var liftOptions = ParsedCanonOptions()
+            liftOptions.memory = ParsedCanonMemory(coreInstanceIndex: 1, memoryName: "memory")
+            component.canonicalDefinitions.append(
+                ParsedCanonicalDefinition(
+                    kind: .lift(coreInstanceIndex: 1, functionName: "call-add", type: addType),
+                    options: liftOptions))
+            component.exports.append(
+                ParsedComponentExport(name: "call-add", kind: .function(index: 1)))
+
+            var imports = ComponentImports()
+            imports.define(name: "add", function: hostAdd)
+
+            let instance = try ComponentLoader(store: store)
+                .instantiate(component: component, imports: imports)
+            guard let callAdd = instance.exportedFunction("call-add") else {
+                Issue.record("Expected call-add function export")
+                return
+            }
+            let results = try callAdd.invoke([.s32(21), .s32(21)])
+            #expect(results.count == 1)
+            if case .s32(let v) = results[0] {
+                #expect(v == 42)
+            } else {
+                Issue.record("Expected s32 result, got \(results[0])")
+            }
+        }
     }
 
 #endif
